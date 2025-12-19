@@ -1,21 +1,27 @@
+# --- Python ---
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-
+# --- Model weights (DO NOT COMMIT) ---
 dr_app/models/
 *.pth
 *.pt
 
+# --- IDE ---
 .vscode/
 .idea/
 
-bash.exe.stackdump
-*.stackdump
-
+# --- Virtual environments ---
 .venv/
 venv/
 env/
 
-flagged/
+# --- OS / misc ---
 .DS_Store
+bash.exe.stackdump
+*.stackdump
+
+# --- App outputs ---
+flagged/
