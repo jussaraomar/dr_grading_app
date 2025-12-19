@@ -2,6 +2,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+
+dr_app/models/
+*.pth
+*.pt
+
 .vscode/
 .idea/
 
