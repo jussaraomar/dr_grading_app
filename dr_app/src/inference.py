@@ -67,7 +67,7 @@ vit_transform = transforms.Compose([
 ])
 
 # -------------------------
-# Model builders (THIS is what you asked)
+# Model builders
 # -------------------------
 def build_resnet_model():
     return ResNetDR(num_classes=NUM_CLASSES, pretrained=False)
@@ -94,7 +94,7 @@ def _load_weights(model, path):
     return model
 
 # -------------------------
-# Load ONCE (global singletons)
+# global singletons
 # -------------------------
 _RESNET = None
 _EFFNET = None
@@ -163,12 +163,11 @@ def run_all_models(pil_img: Image.Image):
     x_cnn = cnn_tensor.unsqueeze(0).to(DEVICE)
     x_vit = vit_tensor.unsqueeze(0).to(DEVICE)
 
-    # predict
+    # predictions
     r_pred, r_conf, _ = _predict_probs(_RESNET, x_cnn)
     e_pred, e_conf, _ = _predict_probs(_EFFNET, x_cnn)
     v_pred, v_conf, _ = _predict_probs(_VIT, x_vit)
 
-    # Grad-CAMs (need non-batched tensor)
     r_cam = _RESNET_CAM.visualize_cam(
         image_tensor=cnn_tensor,
         original_image=original,
@@ -189,20 +188,37 @@ def run_all_models(pil_img: Image.Image):
     res_overlay = Image.fromarray(r_cam["overlay"]) if r_cam else original
     eff_overlay = Image.fromarray(e_cam["overlay"]) if e_cam else original
 
+   
+    # attn_maps = _VIT_ATTN.forward_and_capture(vit_tensor)
+    # rollout = _VIT_ATTN.compute_rollout(discard_ratio=0.0)
+    # cls_to_patches = rollout[0, 1:]  
+    # grid = cls_attention_to_grid(cls_to_patches)
+    # heatmap = upsample_attention_to_image(grid, image_size=VIT_SIZE[0])
+    # vit_overlay = _vit_attention_overlay(original, heatmap)
+
+    # -------------------------
     # ViT attention rollout
-    # forward_and_capture expects non-batched tensor (C,H,W)
-    attn_maps = _VIT_ATTN.forward_and_capture(vit_tensor)
+    # -------------------------
+    vit_overlay = original  # fallback
+    try:
+        attn_maps = _VIT_ATTN.forward_and_capture(vit_tensor)
 
-    # compute_rollout returns NxN matrix (tokens x tokens)
-    rollout = _VIT_ATTN.compute_rollout(discard_ratio=0.0)
+        if attn_maps and len(attn_maps) > 0:
+            rollout = _VIT_ATTN.compute_rollout(discard_ratio=0.0)
 
-    # CLS attention to patch tokens:
-    cls_to_patches = rollout[0, 1:]  # row 0 (CLS), skip CLS itself
+            # CLS attention to patch tokens:
+            cls_to_patches = rollout[0, 1:]  # row 0 (CLS), skip CLS itself
 
-    grid = cls_attention_to_grid(cls_to_patches)
-    heatmap = upsample_attention_to_image(grid, image_size=VIT_SIZE[0])
+            grid = cls_attention_to_grid(cls_to_patches)
+            heatmap = upsample_attention_to_image(grid, image_size=VIT_SIZE[0])
 
-    vit_overlay = _vit_attention_overlay(original, heatmap)
+            vit_overlay = _vit_attention_overlay(original, heatmap)
+        else:
+            print("⚠️ ViT attention maps not available; skipping ViT visualization.")
+    except Exception as e:
+        print(f"⚠️ ViT visualization failed; skipping. Reason: {e}")
+        vit_overlay = original
+
 
 
     df = pd.DataFrame([
