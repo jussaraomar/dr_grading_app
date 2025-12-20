@@ -121,7 +121,7 @@ def crop_to_retina(pil_img: Image.Image, margin: int = 10) -> Image.Image:
 def _init():
     global _RESNET, _EFFNET, _VIT, _RESNET_CAM, _EFFNET_CAM, _VIT_ATTN
 
-    if _RESNET is not None and _VIT_ATTN is not None:
+    if _RESNET is not None and _EFFNET is not None and _VIT is not None:
         return
 
     _RESNET = _load_weights(build_resnet_model(), RESNET_PATH).to(DEVICE).eval()
