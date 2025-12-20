@@ -9,6 +9,7 @@ from PIL import Image
 from torchvision import transforms
 import cv2
 
+from huggingface_hub import hf_hub_download
 from dr_app.utils.grad_cam import ResNetGradCAM, EfficientNetGradCAM
 from dr_app.model_defs.resnet_dr import ResNetDR
 from dr_app.model_defs.efficientnet_dr import EfficientNetDR
@@ -24,7 +25,22 @@ from dr_app.utils.vit_attention import (
 # -------------------------
 NUM_CLASSES = 5
 CNN_SIZE = (512, 512)     
-VIT_SIZE = (224, 224)  
+VIT_SIZE = (224, 224)
+
+
+# -------------------------
+# Hugging Face weights
+# -------------------------
+HF_REPO_ID = "juuuu0/dr-grading-weights"
+
+def _hf_download(filename: str) -> str:
+    return hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=filename,
+        token=os.getenv("HF_TOKEN"), 
+    )
+
+
 
 MEAN = [0.485, 0.456, 0.406]
 STD  = [0.229, 0.224, 0.225]
@@ -32,11 +48,11 @@ STD  = [0.229, 0.224, 0.225]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ROOT = os.path.dirname(os.path.dirname(__file__))  # dr_app/
-WEIGHTS_DIR = os.path.join(ROOT, "models")
 
-RESNET_PATH = os.path.join(WEIGHTS_DIR, "resnet.pth")
-EFFNET_PATH = os.path.join(WEIGHTS_DIR, "effnet.pth")
-VIT_PATH    = os.path.join(WEIGHTS_DIR, "vit.pth")
+RESNET_PATH = _hf_download("resnet.pth")
+EFFNET_PATH = _hf_download("effnet.pth")
+VIT_PATH    = _hf_download("vit.pth")
+
 
 cnn_transform = transforms.Compose([
     transforms.Resize(CNN_SIZE),
