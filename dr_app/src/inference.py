@@ -199,26 +199,18 @@ def run_all_models(pil_img: Image.Image):
     # -------------------------
     # ViT attention rollout
     # -------------------------
-    vit_overlay = original  # fallback
+    _VIT_ATTN.forward_and_capture(vit_tensor)
+
+    # compute_rollout returns (tokens x tokens)
     try:
-        attn_maps = _VIT_ATTN.forward_and_capture(vit_tensor)
-
-        if attn_maps and len(attn_maps) > 0:
-            rollout = _VIT_ATTN.compute_rollout(discard_ratio=0.0)
-
-            # CLS attention to patch tokens:
-            cls_to_patches = rollout[0, 1:]  # row 0 (CLS), skip CLS itself
-
-            grid = cls_attention_to_grid(cls_to_patches)
-            heatmap = upsample_attention_to_image(grid, image_size=VIT_SIZE[0])
-
-            vit_overlay = _vit_attention_overlay(original, heatmap)
-        else:
-            print("⚠️ ViT attention maps not available; skipping ViT visualization.")
-    except Exception as e:
-        print(f"⚠️ ViT visualization failed; skipping. Reason: {e}")
+        rollout = _VIT_ATTN.compute_rollout(discard_ratio=0.0)
+        cls_to_patches = rollout[0, 1:]  # CLS row, skip CLS token
+        grid = cls_attention_to_grid(cls_to_patches)
+        heatmap = upsample_attention_to_image(grid, image_size=VIT_SIZE[0])
+        vit_overlay = _vit_attention_overlay(original, heatmap)
+    except Exception as ex:
+        # fallback: don’t crash the whole app
         vit_overlay = original
-
 
 
     df = pd.DataFrame([

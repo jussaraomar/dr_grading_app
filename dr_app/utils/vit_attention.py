@@ -1,190 +1,168 @@
-# utils/vit_attention.py
-import torch
+# dr_app/utils/vit_attention.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+
 import numpy as np
-import cv2
-from PIL import Image
-import matplotlib.pyplot as plt
-from typing import Optional
+import torch
 
 
-# EncoderBlock imported from vit
-from torchvision.models.vision_transformer import EncoderBlock
+def _find_vit_backbone(model: torch.nn.Module) -> torch.nn.Module:
+    """Finds the ViT backbone inside a model wrapper."""
+    for attr in ["backbone", "vit", "model", "net", "encoder"]:
+        if hasattr(model, attr):
+            return getattr(model, attr)
+    # If it's already a timm ViT, it should have .blocks
+    return model
+
+
+@dataclass
+class _PatchedAttention:
+    module: torch.nn.Module
+    original_forward: callable
 
 
 class ViTAttentionExtractor:
-    """
-    Extracts attention maps from a ViT model
-    """
-
-    def __init__(self, model, device):
-        self.model = model
+   
+    def __init__(self, vit_model: torch.nn.Module, device: torch.device):
         self.device = device
+        self.wrapper = vit_model
+        self.vit = _find_vit_backbone(vit_model)
+
+        self.attn_maps: List[torch.Tensor] = []
+        self._patched: List[_PatchedAttention] = []
+
+        self._patch_attention_modules()
+
+    def _patch_attention_modules(self) -> None:
+       
+        if not hasattr(self.vit, "blocks"):
+            raise RuntimeError(
+                "Could not find transformer blocks on the ViT backbone. "
+                "Expected attribute `.blocks` (timm ViT style)."
+            )
+
+        for blk in self.vit.blocks:
+            if not hasattr(blk, "attn"):
+                continue
+
+            attn_mod = blk.attn
+            if not hasattr(attn_mod, "forward"):
+                continue
+
+            orig_forward = attn_mod.forward
+
+            def wrapped_forward(x, _orig=orig_forward, _self=self, _attn_mod=attn_mod, **kwargs):
+
+                if hasattr(_attn_mod, "qkv") and hasattr(_attn_mod, "num_heads"):
+                    B, N, C = x.shape
+                    qkv = _attn_mod.qkv(x)
+                    qkv = qkv.reshape(B, N, 3, _attn_mod.num_heads, C // _attn_mod.num_heads)
+                    qkv = qkv.permute(2, 0, 3, 1, 4) 
+                    q, k, v = qkv[0], qkv[1], qkv[2]
+
+                    scale = getattr(_attn_mod, "scale", (q.shape[-1] ** -0.5))
+                    attn = (q @ k.transpose(-2, -1)) * scale
+                    attn = attn.softmax(dim=-1)
+
+                    _self.attn_maps.append(attn.detach())
+
+           
+                return _orig(x, **kwargs)
+
+            
+            attn_mod.forward = wrapped_forward
+            self._patched.append(_PatchedAttention(attn_mod, orig_forward))
+
+    def clear(self) -> None:
         self.attn_maps = []
-        self.hooks = []
-        self._register_hooks()
 
-    def _hook_fn(self, module, input, output):
-        if hasattr(module, "last_attn") and module.last_attn is not None:
-            self.attn_maps.append(module.last_attn.detach().cpu())
-
-    def _register_hooks(self):
-        """
-        Attach hooks to all EncoderBlock modules in the model.
-        """
-        for name, module in self.model.named_modules():
-            if isinstance(module, EncoderBlock):
-                hook = module.register_forward_hook(self._hook_fn)
-                self.hooks.append(hook)
-
-    def clear(self):
-        self.attn_maps = []
-
-    def remove_hooks(self):
-        for h in self.hooks:
-            h.remove()
-        self.hooks = []
-
-    def forward_and_capture(self, image_tensor):
+    @torch.no_grad()
+    def forward_and_capture(self, img_tensor: torch.Tensor) -> List[torch.Tensor]:
+       
         self.clear()
-        self.model.eval()
-        with torch.no_grad():
-            _ = self.model(image_tensor.unsqueeze(0).to(self.device))
 
-        if not self.attn_maps:
-            print("No attention maps were captured from EncoderBlock.last_attn.")
+        if img_tensor.ndim == 3:
+            x = img_tensor.unsqueeze(0)
+        elif img_tensor.ndim == 4:
+            x = img_tensor
         else:
-            print(f"Captured attention from {len(self.attn_maps)} encoder blocks.")
+            raise ValueError(f"Expected 3D or 4D tensor, got shape {tuple(img_tensor.shape)}")
 
+        x = x.to(self.device)
+        _ = self.wrapper(x)  
         return self.attn_maps
 
-    def compute_rollout(self, discard_ratio: float = 0.0) -> np.ndarray:
+    def compute_rollout(self, discard_ratio: float = 0.0, head_fusion: str = "mean") -> torch.Tensor:
+       
         if not self.attn_maps:
             raise RuntimeError("No attention maps available. Call forward_and_capture first.")
 
-        attn_mats = []
+       
+        attn_stack = self.attn_maps
 
-        for attn in self.attn_maps:
-            A = attn[0].numpy() 
+       
+        fused_layers = []
+        for a in attn_stack:
+            if head_fusion == "mean":
+                fused = a.mean(dim=1)
+            elif head_fusion == "max":
+                fused = a.max(dim=1).values
+            else:
+                raise ValueError("head_fusion must be 'mean' or 'max'")
+            fused_layers.append(fused)
 
-            if discard_ratio > 0.0:
-                flat = A.reshape(-1)
-                threshold = np.quantile(flat, discard_ratio)
-                A[ A < threshold ] = 0.0
+       
+        if discard_ratio > 0:
+            for i, A in enumerate(fused_layers):
+                B, N, _ = A.shape
+                A2 = A.clone()
+               
+                flat = A2.view(B, -1)
+                _, idx = flat.sort(dim=-1)
+                num_discard = int(flat.shape[-1] * discard_ratio)
+                if num_discard > 0:
+                    discard_idx = idx[:, :num_discard]
+                    flat.scatter_(1, discard_idx, 0.0)
+                fused_layers[i] = flat.view(B, N, N)
 
-           
-            A = A / (A.sum(axis=-1, keepdims=True) + 1e-8)
+       
+        result = torch.eye(fused_layers[0].shape[-1], device=fused_layers[0].device).unsqueeze(0)
+        for A in fused_layers:
+            A = A + torch.eye(A.shape[-1], device=A.device).unsqueeze(0)
+            A = A / A.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+            result = A @ result
 
-            N = A.shape[0]
-            A = A + np.eye(N, dtype=np.float32)
-            A = A / (A.sum(axis=-1, keepdims=True) + 1e-8)
-
-            attn_mats.append(A)
-
-        # multiply attention matrices from all layers
-        rollout = attn_mats[0]
-        for i in range(1, len(attn_mats)):
-            rollout = attn_mats[i] @ rollout
-
-        return rollout
+        
+        return result[0]
 
 
-def cls_attention_to_grid(cls_attn: np.ndarray) -> np.ndarray:
+# -------------------------
+# Helpers
+# -------------------------
+def cls_attention_to_grid(cls_to_patches: torch.Tensor) -> np.ndarray:
     """
-    Converts CLS-to-patch attention vector into a square grid
+    cls_to_patches: (num_patches,) tensor
+    returns square grid (sqrt(patches) x sqrt(patches))
     """
-    num_patches = cls_attn.shape[0]
-    grid_size = int(np.sqrt(num_patches))
-    cls_attn = cls_attn[: grid_size * grid_size]  # safety
-    grid = cls_attn.reshape(grid_size, grid_size)
-
-    # Normalize to [0,1]
-    grid = (grid - grid.min()) / (grid.max() - grid.min() + 1e-8)
-    return grid
-
-
-def upsample_attention_to_image(attn_grid: np.ndarray, image_size: int) -> np.ndarray:
-    """
-    Upsample
-    """
-    heatmap = cv2.resize(attn_grid, (image_size, image_size), interpolation=cv2.INTER_CUBIC)
-    return heatmap
-
-
-def create_retinal_mask_from_image(original_image: Image.Image) -> np.ndarray:
-    """
-    Simple retina mask
-    """
-    original_np = np.array(original_image) 
-    gray = cv2.cvtColor(original_np, cv2.COLOR_RGB2GRAY)
-    mask = gray > 5
-    return mask
-
-
-def visualize_attention_on_image(
-    original_image: Image.Image,
-    heatmap: np.ndarray,
-    save_path: Optional[str] = None,
-    title_prefix: str = "Attention",
-    apply_retina_mask: bool = True,
-):
-    original_np = np.array(original_image) 
-    H, W, _ = original_np.shape
-
-    # Resize heatmap to match the original image size
-    heatmap = cv2.resize(heatmap, (W, H), interpolation=cv2.INTER_CUBIC)
-
-    # mask outside the retinal area
-    if apply_retina_mask:
-        mask = create_retinal_mask_from_image(original_image)
-        heatmap_masked = np.zeros_like(heatmap)
-        heatmap_masked[mask] = heatmap[mask]
-        heatmap = heatmap_masked
-
-    # Normalize again after masking
-    if heatmap.max() > heatmap.min():
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+    if isinstance(cls_to_patches, torch.Tensor):
+        v = cls_to_patches.detach().cpu().numpy()
     else:
-        heatmap = np.zeros_like(heatmap)
+        v = np.asarray(cls_to_patches)
 
-    # Colorize
-    heatmap_uint8 = np.uint8(255 * heatmap)
-    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+    n = v.shape[0]
+    s = int(np.sqrt(n))
+    if s * s != n:
+        raise ValueError(f"Number of patches ({n}) is not a perfect square.")
+    return v.reshape(s, s)
 
-    # Overlay
-    overlay = cv2.addWeighted(original_np, 0.5, heatmap_color, 0.5, 0)
 
-        # Plot: 1x4 layout (original, heatmap, overlay, colorbar)
-    fig, axes = plt.subplots(
-        1,
-        4,
-        figsize=(18, 5),
-        gridspec_kw={"width_ratios": [4, 4, 4, 0.2]},
-    )
-
-    # Original image
-    axes[0].imshow(original_np)
-    axes[0].set_title("Original Image")
-    axes[0].axis("off")
-
-    # Heatmap
-    im = axes[1].imshow(heatmap, cmap="jet")
-    axes[1].set_title(f"{title_prefix} Heatmap")
-    axes[1].axis("off")
-
-    # Overlay
-    axes[2].imshow(overlay)
-    axes[2].set_title(f"{title_prefix} Overlay")
-    axes[2].axis("off")
-
-    # Colorbar panel
-    axes[3].axis("off")
-    cbar = fig.colorbar(im, ax=axes[3], fraction=0.8, pad=0.05)
-    cbar.ax.tick_params(labelsize=8)
-    axes[3].set_title("Attention\nIntensity", fontsize=10)
-
-    plt.tight_layout()
-    if save_path is not None:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        print(f"✅ Saved attention visualization to {save_path}")
-    plt.close(fig)
+def upsample_attention_to_image(grid: np.ndarray, image_size: int) -> np.ndarray:
+    """
+    grid: (gh, gw)
+    returns heatmap (image_size, image_size) float32
+    """
+    import cv2
+    heat = cv2.resize(grid.astype(np.float32), (image_size, image_size), interpolation=cv2.INTER_CUBIC)
+    return heat
