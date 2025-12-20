@@ -10,6 +10,9 @@ dr_app/models/
 .vscode/
 .idea/
 
+bash.exe.stackdump
+*.stackdump
+
 .venv/
 venv/
 env/
