@@ -11,15 +11,12 @@ import time
 import pickle
 from sklearn.model_selection import train_test_split
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
-
-from models import ResNetDR
-from utils.data_loader import create_data_loaders, get_class_weights
-from utils.training import train_epoch, validate_epoch, calculate_kappa
-from config.paths import paths
-from config.params import TrainingParams
-from config.params import ModelParams
+from dr_app.model_defs.resnet_dr import ResNetDR
+from dr_app.utils.data_loader import create_data_loaders, get_class_weights
+from dr_app.utils.training import train_epoch, validate_epoch, calculate_kappa
+from dr_app.config.paths import paths
+from dr_app.config.params import TrainingParams
+from dr_app.config.params import ModelParams
 
 
 def main():
